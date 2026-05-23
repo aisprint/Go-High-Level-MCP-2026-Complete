@@ -9,8 +9,10 @@ import cors from 'cors';
 import * as dotenv from 'dotenv';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 
 import { EnhancedGHLClient } from './enhanced-ghl-client.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -48,6 +50,44 @@ function createMcpServer(client: EnhancedGHLClient): McpServer {
     { capabilities: { tools: {} } }
   );
   new ToolRegistry(client).registerAll(server);
+  return server;
+}
+
+/**
+ * Create a low-level Server that exposes full JSON schemas for all tools.
+ * This fixes the empty-schema issue in McpServer.registerTool() where
+ * inputSchema is not passed, causing MCP clients to strip parameters.
+ */
+function createServerWithSchemas(client: EnhancedGHLClient): Server {
+  const server = new Server(
+    { name: 'ghl-mcp-server', version: '2.0.0' },
+    { capabilities: { tools: {} } }
+  );
+  const registry = new ToolRegistry(client);
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: registry.getAllToolDefinitions(),
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      const result = await registry.callTool(name, args || {});
+      if (result === undefined) {
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+      }
+      return {
+        content: [{
+          type: 'text' as const,
+          text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+        }],
+      };
+    } catch (err: any) {
+      if (err instanceof McpError) throw err;
+      throw new McpError(ErrorCode.InternalError, `Tool execution failed: ${err.message}`);
+    }
+  });
+
   return server;
 }
 
@@ -96,7 +136,8 @@ async function main() {
       const client = reqAccessToken && reqLocationId
         ? new EnhancedGHLClient({ ...config, accessToken: reqAccessToken, locationId: reqLocationId })
         : ghlClient;
-      const requestServer = createMcpServer(client);
+      // Use low-level Server to expose full JSON schemas (fixes empty-schema bug)
+      const requestServer = createServerWithSchemas(client);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await requestServer.connect(transport);
       await transport.handleRequest(req, res, req.body);
