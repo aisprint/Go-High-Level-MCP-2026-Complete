@@ -58,12 +58,12 @@ function createMcpServer(client: EnhancedGHLClient): McpServer {
  * This fixes the empty-schema issue in McpServer.registerTool() where
  * inputSchema is not passed, causing MCP clients to strip parameters.
  */
-function createServerWithSchemas(client: EnhancedGHLClient): Server {
+function createServerWithSchemas(client: EnhancedGHLClient, locationId?: string): Server {
   const server = new Server(
     { name: 'ghl-mcp-server', version: '2.0.0' },
     { capabilities: { tools: {} } }
   );
-  const registry = new ToolRegistry(client);
+  const registry = new ToolRegistry(client, locationId);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: registry.getAllToolDefinitions(),
@@ -137,7 +137,9 @@ async function main() {
         ? new EnhancedGHLClient({ ...config, accessToken: reqAccessToken, locationId: reqLocationId })
         : ghlClient;
       // Use low-level Server to expose full JSON schemas (fixes empty-schema bug)
-      const requestServer = createServerWithSchemas(client);
+      // Pass effective locationId so WorkflowBuilderTools uses the correct sub-account
+      const effectiveLocationId = reqLocationId || config.locationId;
+      const requestServer = createServerWithSchemas(client, effectiveLocationId);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await requestServer.connect(transport);
       await transport.handleRequest(req, res, req.body);
